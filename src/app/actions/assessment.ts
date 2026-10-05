@@ -17,6 +17,24 @@ export interface CreateAssessmentInput {
   aspectScores: AspectScoreInput[];
 }
 
+export async function deleteAssessment(id: string) {
+  try {
+    await prisma.assessment.delete({
+      where: {
+        id: id,
+      },
+    });
+
+    // Melakukan refresh data pada halaman secara otomatis setelah dihapus
+    revalidatePath("/admin/assessments");
+    
+    return { success: true, message: "Data berhasil dihapus" };
+  } catch (error) {
+    console.error("Error saat menghapus assessment:", error);
+    return { success: false, message: "Gagal menghapus data" };
+  }
+}
+
 export async function submitAssessment(data: CreateAssessmentInput) {
   try {
     if (!data.satgasId || data.aspectScores.length === 0) {
@@ -41,7 +59,7 @@ export async function submitAssessment(data: CreateAssessmentInput) {
     const assessment = await prisma.assessment.create({
       data: {
         satgasId: data.satgasId,
-        facilitatorId: data.facilitatorId,
+        facilitatorId: data.facilitatorId, 
         period: data.evalPeriod,
         finalScore: finalScore,
         goldStars: goldStarEarned,
@@ -84,5 +102,23 @@ export async function getActiveAspects() {
       { id: "asp-4", name: "Inisiatif & Problem Solving", category: "D", weight: 20 },
       { id: "asp-5", name: "Pelaporan & Administrasi", category: "E", weight: 15 },
     ];
+  }
+}
+
+export async function getAssessmentsData() {
+  try {
+    const assessments = await prisma.assessment.findMany({
+      orderBy: {
+        // Mengurutkan dari data yang terakhir dimasukkan. 
+        // Jika di schemamu ada field 'createdAt', kamu bisa ubah 'id' menjadi 'createdAt'
+        id: "desc",
+      },
+    });
+    
+    return assessments;
+  } catch (error) {
+    console.error("Error mengambil data assessment:", error);
+    // Mengembalikan array kosong jika terjadi error agar halaman tidak crash
+    return []; 
   }
 }
