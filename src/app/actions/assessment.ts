@@ -3,77 +3,101 @@
 import { prisma } from "@/lib/prisma";
 import { revalidatePath } from "next/cache";
 
-export interface AspectScoreInput {
+// Nilai bintang silver per rating (sesuai komentar di schema: 0 - 4)
+const RATING_SILVER: Record<string, number> = {
+  NO_OPINION: 0,
+  POOR: 1,
+  FAIR: 2,
+  GOOD: 3,
+  EXCELLENT: 4,
+};
+
+// Aturan konversi: berapa silver = 1 gold (SILAKAN SESUAIKAN)
+const SILVER_PER_GOLD = 10;
+
+export interface AspectRatingInput {
   aspectId: string;
-  score: number;
-  notes?: string;
+  // Aspek RATING: "NO_OPINION" | "POOR" | "FAIR" | "GOOD" | "EXCELLENT"
+  // Aspek PENALTY: "VIOLATED" jika melanggar, null jika tidak
+  rating?: string | null;
 }
 
 export interface CreateAssessmentInput {
   satgasId: string;
   facilitatorId: string;
-  evalPeriod: string; // misal: "Minggu 1 - Oktober 2026"
-  generalNotes?: string;
-  aspectScores: AspectScoreInput[];
-}
-
-export async function deleteAssessment(id: string) {
-  try {
-    await prisma.assessment.delete({
-      where: {
-        id: id,
-      },
-    });
-
-    // Melakukan refresh data pada halaman secara otomatis setelah dihapus
-    revalidatePath("/admin/assessments");
-    
-    return { success: true, message: "Data berhasil dihapus" };
-  } catch (error) {
-    console.error("Error saat menghapus assessment:", error);
-    return { success: false, message: "Gagal menghapus data" };
-  }
+  periodMonth: number; // 1 - 12
+  periodYear: number; // contoh: 2026
+  isDraft?: boolean;
+  details: AspectRatingInput[];
 }
 
 export async function submitAssessment(data: CreateAssessmentInput) {
   try {
-    if (!data.satgasId || data.aspectScores.length === 0) {
-      return { success: false, error: "Data Satgas dan Skor Aspek wajib diisi." };
+    if (!data.satgasId || !data.facilitatorId || data.details.length === 0) {
+      return { success: false, error: "Data Satgas, fasilitator, dan penilaian wajib diisi." };
+    }
+    if (data.periodMonth < 1 || data.periodMonth > 12) {
+      return { success: false, error: "Bulan periode tidak valid." };
     }
 
-    // 1. Hitung Rata-Rata Skor Keseluruhan
-    const totalScoreSum = data.aspectScores.reduce((sum, item) => sum + item.score, 0);
-    const finalScore = Math.round(totalScoreSum / data.aspectScores.length);
+    // Ambil data aspek dari database agar perhitungan tidak bisa dimanipulasi dari browser
+    const aspects = await prisma.aspect.findMany({
+      where: { id: { in: data.details.map((d) => d.aspectId) } },
+    });
+    const aspectMap = new Map(aspects.map((a) => [a.id, a]));
 
-    // 2. Hitung Perolehan Bintang (Gold >= 85, Silver >= 70)
-    let goldStarEarned = 0;
-    let silverStarEarned = 0;
-
-    if (finalScore >= 85) {
-      goldStarEarned = 1;
-    } else if (finalScore >= 70) {
-      silverStarEarned = 1;
+    if (aspectMap.size !== new Set(data.details.map((d) => d.aspectId)).size) {
+      return { success: false, error: "Ada aspek penilaian yang tidak ditemukan." };
     }
 
-    // 3. Simpan Transaksi Penilaian ke Database
-    const assessment = await prisma.assessment.create({
-      data: {
+    const detailRows = data.details.map((d) => {
+      const aspect = aspectMap.get(d.aspectId)!;
+      let silverEarned = 0;
+
+      if (aspect.type === "PENALTY") {
+        if (d.rating === "VIOLATED") silverEarned = -Math.abs(aspect.deduction);
+      } else {
+        silverEarned = RATING_SILVER[d.rating ?? "NO_OPINION"] ?? 0;
+      }
+
+      return { aspectId: d.aspectId, rating: d.rating ?? null, silverEarned };
+    });
+
+    const totalSilver = Math.max(0, detailRows.reduce((sum, r) => sum + r.silverEarned, 0));
+    const totalGold = Math.floor(totalSilver / SILVER_PER_GOLD);
+
+    // Satu Satgas hanya punya satu penilaian per bulan: jika sudah ada, diperbarui
+    const existing = await prisma.assessment.findFirst({
+      where: {
         satgasId: data.satgasId,
-        facilitatorId: data.facilitatorId, 
-        period: data.evalPeriod,
-        finalScore: finalScore,
-        goldStars: goldStarEarned,
-        silverStars: silverStarEarned,
-        notes: data.generalNotes || "",
-        details: {
-          create: data.aspectScores.map((item) => ({
-            aspectId: item.aspectId,
-            score: item.score,
-            notes: item.notes || "",
-          })),
-        },
+        periodMonth: data.periodMonth,
+        periodYear: data.periodYear,
       },
     });
+
+    const assessment = existing
+      ? await prisma.assessment.update({
+          where: { id: existing.id },
+          data: {
+            facilitatorId: data.facilitatorId,
+            totalSilver,
+            totalGold,
+            isDraft: data.isDraft ?? false,
+            details: { deleteMany: {}, create: detailRows },
+          },
+        })
+      : await prisma.assessment.create({
+          data: {
+            satgasId: data.satgasId,
+            facilitatorId: data.facilitatorId,
+            periodMonth: data.periodMonth,
+            periodYear: data.periodYear,
+            totalSilver,
+            totalGold,
+            isDraft: data.isDraft ?? false,
+            details: { create: detailRows },
+          },
+        });
 
     revalidatePath("/admin/dashboard");
     revalidatePath("/admin/leaderboard");
@@ -86,39 +110,45 @@ export async function submitAssessment(data: CreateAssessmentInput) {
   }
 }
 
-// Ambil Aspek Penilaian Aktif dari Database
+// Ambil semua aspek, diurutkan per kode kategori (A, B, C, ...)
 export async function getActiveAspects() {
   try {
-    const aspects = await prisma.aspect.findMany({
-      orderBy: { order: "asc" },
+    return await prisma.aspect.findMany({
+      include: { category: true },
+      orderBy: [{ category: { code: "asc" } }, { createdAt: "asc" }],
     });
-    return aspects;
   } catch (error) {
-    // Fallback jika database belum diseed
-    return [
-      { id: "asp-1", name: "Kedisiplinan & Kehadiran", category: "A", weight: 20 },
-      { id: "asp-2", name: "Kualitas Eksekusi Program", category: "B", weight: 25 },
-      { id: "asp-3", name: "Kerjasama & Komunikasi Tim", category: "C", weight: 20 },
-      { id: "asp-4", name: "Inisiatif & Problem Solving", category: "D", weight: 20 },
-      { id: "asp-5", name: "Pelaporan & Administrasi", category: "E", weight: 15 },
-    ];
+    console.error("Error getActiveAspects:", error);
+    return [];
   }
 }
 
+// Hapus penilaian (detail ikut terhapus otomatis karena onDelete: Cascade)
+export async function deleteAssessment(id: string) {
+  try {
+    await prisma.assessment.delete({ where: { id } });
+    revalidatePath("/admin/dashboard");
+    revalidatePath("/admin/leaderboard");
+    revalidatePath("/dashboard/rekapitulasi");
+    return { success: true };
+  } catch (error: any) {
+    console.error("Error deleteAssessment:", error);
+    return { success: false, error: error.message || "Gagal menghapus penilaian." };
+  }
+}
+
+// Daftar semua penilaian untuk tabel rekap
 export async function getAssessmentsData() {
   try {
-    const assessments = await prisma.assessment.findMany({
-      orderBy: {
-        // Mengurutkan dari data yang terakhir dimasukkan. 
-        // Jika di schemamu ada field 'createdAt', kamu bisa ubah 'id' menjadi 'createdAt'
-        id: "desc",
+    return await prisma.assessment.findMany({
+      include: {
+        satgas: { select: { id: true, name: true, nip: true, level: true, cluster: true } },
+        facilitator: { select: { id: true, name: true } },
       },
+      orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }, { createdAt: "desc" }],
     });
-    
-    return assessments;
   } catch (error) {
-    console.error("Error mengambil data assessment:", error);
-    // Mengembalikan array kosong jika terjadi error agar halaman tidak crash
-    return []; 
+    console.error("Error getAssessmentsData:", error);
+    return [];
   }
 }

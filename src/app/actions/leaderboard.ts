@@ -4,31 +4,22 @@ import { prisma } from "@/lib/prisma";
 
 export async function getLeaderboardData() {
   try {
-    // Ambil data semua Satgas beserta riwayat evaluasinya
     const satgasList = await prisma.user.findMany({
       where: { role: "SATGAS" },
       include: {
         cluster: true,
-        satgasAssessments: {
-          select: {
-            score: true,
-            createdAt: true,
-          },
+        assessments: {
+          where: { isDraft: false },
+          select: { totalSilver: true, totalGold: true },
         },
       },
     });
 
-    // Olah data skor & akumulasi bintang
     const leaderboard = satgasList.map((satgas) => {
-      const totalEvaluasi = satgas.satgasAssessments.length;
-      const totalSkor = satgas.satgasAssessments.reduce(
-        (acc, curr) => acc + (curr.score || 0),
-        0
-      );
-      const rataRata = totalEvaluasi > 0 ? totalSkor / totalEvaluasi : 0;
-
-      // Logika Bintang Emas (contoh: setiap kelipatan nilai rata-rata >= 85 mendapat bintang)
-      const goldStars = rataRata >= 85 ? Math.floor(rataRata / 10) - 7 : 0;
+      const totalEvaluasi = satgas.assessments.length;
+      const totalSilver = satgas.assessments.reduce((acc, a) => acc + a.totalSilver, 0);
+      const goldStars = satgas.assessments.reduce((acc, a) => acc + a.totalGold, 0);
+      const rataRata = totalEvaluasi > 0 ? totalSilver / totalEvaluasi : 0;
 
       return {
         id: satgas.id,
@@ -36,15 +27,16 @@ export async function getLeaderboardData() {
         nip: satgas.nip,
         level: satgas.level,
         cluster: satgas.cluster?.name || "Tanpa Klaster",
-        wilayah: satgas.cluster?.description || "-",
+        wilayah: satgas.cluster?.wilayah || "-",
         totalEvaluasi,
-        rataRataScore: Math.round(rataRata * 10) / 10,
-        goldStars: goldStars > 0 ? goldStars : 0,
+        totalSilver,
+        rataRataScore: Math.round(rataRata * 10) / 10, // rata-rata silver per evaluasi
+        goldStars,
       };
     });
 
-    // Urutkan berdasarkan Rata-Rata Skor Tertinggi
-    leaderboard.sort((a, b) => b.rataRataScore - a.rataRataScore);
+    // Urutkan: gold terbanyak dulu, jika sama pakai total silver
+    leaderboard.sort((a, b) => b.goldStars - a.goldStars || b.totalSilver - a.totalSilver);
 
     return leaderboard;
   } catch (error) {

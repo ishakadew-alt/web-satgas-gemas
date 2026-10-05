@@ -2,57 +2,70 @@
 
 import { prisma } from "@/lib/prisma";
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agt", "Sep", "Okt", "Nov", "Des"];
+
 export async function getDashboardStats() {
   try {
     const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
 
-    const [
-      totalSatgas,
-      evaluasiBulanIni,
-      totalAssessments,
-      topSatgasList,
-    ] = await Promise.all([
-      prisma.user.count({ where: { role: "SATGAS" } }),
-      prisma.assessment.count({
-        where: { createdAt: { gte: startOfMonth } },
-      }),
-      prisma.assessment.count(),
-      prisma.user.findMany({
-        where: { role: "SATGAS" },
-        take: 3,
-        include: { cluster: true },
-      }),
-    ]);
+    const [totalSatgas, evaluasiBulanIni, totalAssessments, goldSum, yearAssessments, satgasList] =
+      await Promise.all([
+        prisma.user.count({ where: { role: "SATGAS" } }),
+        prisma.assessment.count({ where: { periodMonth: month, periodYear: year, isDraft: false } }),
+        prisma.assessment.count({ where: { isDraft: false } }),
+        prisma.assessment.aggregate({ _sum: { totalGold: true }, where: { isDraft: false } }),
+        prisma.assessment.findMany({
+          where: { periodYear: year, isDraft: false },
+          select: {
+            periodMonth: true,
+            totalGold: true,
+            satgas: { select: { cluster: { select: { wilayah: true } } } },
+          },
+        }),
+        prisma.user.findMany({
+          where: { role: "SATGAS" },
+          include: {
+            cluster: true,
+            assessments: { where: { isDraft: false }, select: { totalGold: true } },
+          },
+        }),
+      ]);
 
-    // Data simulasi grafik wilayah (bisa dihubungkan ke DB)
+    // Gold per wilayah (tahun ini)
+    const region: Record<string, number> = { BARAT: 0, TIMUR: 0, CENTRAL: 0 };
+    // Jumlah evaluasi per bulan (tahun ini)
+    const monthly = new Array(12).fill(0);
+
+    for (const a of yearAssessments) {
+      const w = a.satgas.cluster?.wilayah;
+      if (w) region[w] += a.totalGold;
+      monthly[a.periodMonth - 1] += 1;
+    }
+
     const starPerRegionData = [
-      { name: "Barat", gold: 0 },
-      { name: "Timur", gold: 0 },
-      { name: "Central", gold: 0 },
+      { name: "Barat", gold: region.BARAT },
+      { name: "Timur", gold: region.TIMUR },
+      { name: "Central", gold: region.CENTRAL },
     ];
 
-    // Data simulasi tren bulanan
-    const monthlyTrendData = [
-      { month: "Jan", count: 0 },
-      { month: "Feb", count: 0 },
-      { month: "Mar", count: 0 },
-      { month: "Apr", count: 0 },
-      { month: "Mei", count: 0 },
-      { month: "Jun", count: 0 },
-      { month: "Jul", count: 0 },
-      { month: "Agt", count: 0 },
-      { month: "Sep", count: 0 },
-      { month: "Okt", count: 0 },
-      { month: "Nov", count: 0 },
-      { month: "Des", count: 0 },
-    ];
+    const monthlyTrendData = MONTHS.map((m, i) => ({ month: m, count: monthly[i] }));
+
+    // 3 Satgas dengan total gold terbanyak
+    const topSatgasList = satgasList
+      .map(({ assessments, password, ...s }) => ({
+        ...s,
+        totalGold: assessments.reduce((sum, a) => sum + a.totalGold, 0),
+      }))
+      .sort((a, b) => b.totalGold - a.totalGold)
+      .slice(0, 3);
 
     return {
       totalSatgas,
       evaluasiBulanIni,
       totalAssessments,
-      totalGoldStars: 0,
+      totalGoldStars: goldSum._sum.totalGold ?? 0,
       starPerRegionData,
       monthlyTrendData,
       topSatgasList,
