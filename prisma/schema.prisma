@@ -1,0 +1,102 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql" // Sesuaikan dengan database Anda (mysql / postgresql / sqlite)
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPERADMIN
+  FACILITATOR
+  SATGAS
+}
+
+enum Level {
+  WIJIL
+  MADYA
+  NARAYA
+  SUWAWANA
+  JANA_UTAMA
+}
+
+enum Wilayah {
+  BARAT
+  TIMUR
+  CENTRAL
+}
+
+enum AspectType {
+  RATING   // No Opinion s.d. Excellent (0 - 4 Silver Stars)
+  PENALTY  // Pengurangan Bintang Silver
+}
+
+model Cluster {
+  id        String   @id @default(cuid())
+  name      String   // Contoh: Besito, Pladen, Jetak
+  wilayah   Wilayah
+  users     User[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id            String       @id @default(cuid())
+  name          String
+  nip           String       @unique
+  password      String
+  role          Role         @default(SATGAS)
+  level         Level?        @default(WIJIL)
+  clusterId     String?
+  cluster       Cluster?     @relation(fields: [clusterId], references: [id])
+  assessments   Assessment[] @relation("SatgasAssessments")
+  givenEval     Assessment[] @relation("FacilitatorAssessments")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model Category {
+  id           String   @id @default(cuid())
+  code         String   @unique // Contoh: A, B, C, D, E
+  name         String   // Contoh: Partisipasi Penerima Manfaat
+  isSelectable Boolean  @default(false) // True khusus Kategori B (pilihan lokasi/tugas satgas)
+  aspects      Aspect[]
+  createdAt    DateTime @default(now())
+}
+
+model Aspect {
+  id          String            @id @default(cuid())
+  categoryId  String
+  category    Category          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  name        String            // Contoh: Absensi Pemeriksaan Baduta, Manipulasi data
+  type        AspectType        @default(RATING)
+  deduction   Int               @default(0) // Untuk E. Pelanggaran (misal: -2, -5)
+  details     AssessmentDetail[]
+  createdAt   DateTime          @default(now())
+}
+
+model Assessment {
+  id            String             @id @default(cuid())
+  satgasId      String
+  satgas        User               @relation("SatgasAssessments", fields: [satgasId], references: [id])
+  facilitatorId String
+  facilitator   User               @relation("FacilitatorAssessments", fields: [facilitatorId], references: [id])
+  periodMonth   Int                // 1 - 12
+  periodYear    Int                // Contoh: 2026
+  totalSilver   Int                @default(0)
+  totalGold     Int                @default(0)
+  isDraft       Boolean            @default(false)
+  details       AssessmentDetail[]
+  createdAt     DateTime           @default(now())
+}
+
+model AssessmentDetail {
+  id           String     @id @default(cuid())
+  assessmentId String
+  assessment   Assessment @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  aspectId     String
+  aspect       Aspect     @relation(fields: [aspectId], references: [id])
+  rating       String?    // NO_OPINION, POOR, FAIR, GOOD, EXCELLENT
+  silverEarned Int        @default(0) // Poin bintang silver yang didapat/dikurangi
+}
